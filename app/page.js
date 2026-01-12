@@ -7,23 +7,29 @@ import { CSS2DRenderer, CSS2DObject } from "three/examples/jsm/renderers/CSS2DRe
 import * as turf from "@turf/turf";
 
 /*
-  GlobePage.jsx
-  - Globe now continuously and slowly rotates from load (always animating)
-  - Rotation uses a globeGroup so camera animations / interactions do not stop the globe spin
-  - Slight slow nod (small X oscillation) added for a subtle 3D feel
-  - Mobile/desktop tuning preserved
+  Page.jsx (updated)
+  - Uses useRef for Three.js objects that need cross-scope access:
+    globeRef, atmosphereRef, globeGroupRef, pointsRef
+  - animate() and interaction handlers reference .current on those refs,
+    avoiding scope issues that stop rotation or cause runtime errors.
+  - Keeps the original behavior / cleanup.
 */
 
 export default function Page() {
   const mountRef = useRef(null);
   const frameRef = useRef(null);
   const labelRendererRef = useRef(null);
+
+  // stable refs for Three.js objects that must be accessed from animate() and handlers
+  const globeRef = useRef(null);
+  const atmosphereRef = useRef(null);
+  const globeGroupRef = useRef(null);
+  const pointsRef = useRef(null);
+
   const [tooltip, setTooltip] = useState(null);
   const [panelOpen, setPanelOpen] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
 
-
-  
   const displayCommunities = [
     { label: "Indian community", count: 15968, geo: "India" },
     { label: "Chi", count: 16497, geo: "China" },
@@ -216,6 +222,7 @@ export default function Page() {
 
     // create a group so we can rotate the globe independently
     const globeGroup = new THREE.Group();
+    globeGroupRef.current = globeGroup;
     scene.add(globeGroup);
 
     // globe mesh
@@ -232,6 +239,7 @@ export default function Page() {
         shininess: 2
       })
     );
+    globeRef.current = globe;
     globeGroup.add(globe);
 
     // atmosphere (added to same group)
@@ -244,6 +252,7 @@ export default function Page() {
         side: THREE.BackSide
       })
     );
+    atmosphereRef.current = atmosphere;
     globeGroup.add(atmosphere);
 
     // mobile adjustments
@@ -297,7 +306,6 @@ export default function Page() {
     }
 
     // load geojson and build geometry & labels
-    let pointsObject = null;
     fetch("https://raw.githubusercontent.com/holtzy/D3-graph-gallery/master/DATA/world.geojson")
       .then((res) => res.json())
       .then((world) => {
@@ -393,7 +401,8 @@ export default function Page() {
             sizeAttenuation: true
           });
 
-          pointsObject = new THREE.Points(geometry, material);
+          const pointsObject = new THREE.Points(geometry, material);
+          pointsRef.current = pointsObject;
           scene.add(pointsObject);
         }
 
@@ -430,6 +439,7 @@ export default function Page() {
 
     function onPointerMove(e) {
       const [clientX, clientY] = updateMouseFromEvent(e);
+      const pointsObject = pointsRef.current;
       if (!pointsObject) {
         setTooltip(null);
         return;
@@ -452,6 +462,7 @@ export default function Page() {
     }
 
     function onPointerEnd() {
+      const pointsObject = pointsRef.current;
       if (!pointsObject) return;
       raycaster.setFromCamera(mouse, camera);
       const hits = raycaster.intersectObject(pointsObject);
@@ -551,11 +562,17 @@ export default function Page() {
 
     // animation loop: globeGroup rotates always and slowly; small X oscillation for depth
     function animate() {
-      // continuous rotation
-      globeGroup.rotation.y += AUTO_ROTATE_SPEED;
-      t += AUTO_ROTATE_SPEED * 0.6; // time-like value for subtle nod
-      globeGroup.rotation.x = Math.sin(t) * 0.02; // tiny nod to add life
-      atmosphere.rotation.y += AUTO_ROTATE_SPEED * 0.6; // atmosphere spin slightly different
+      // read from refs to ensure animate always has access to the objects
+      const gg = globeGroupRef.current;
+      const atm = atmosphereRef.current;
+      if (gg) {
+        gg.rotation.y += AUTO_ROTATE_SPEED;
+        t += AUTO_ROTATE_SPEED * 0.6; // time-like value for subtle nod
+        gg.rotation.x = Math.sin(t) * 0.02; // tiny nod to add life
+      }
+      if (atm) {
+        atm.rotation.y += AUTO_ROTATE_SPEED * 0.6; // atmosphere spin slightly different
+      }
 
       // label declutter
       const camDir = camera.position.clone().normalize();
@@ -625,20 +642,21 @@ export default function Page() {
       controls.dispose();
       renderer.dispose();
       spriteTex.dispose();
+
+      // dispose points geometry/material if present
+      if (pointsRef.current) {
+        pointsRef.current.geometry.dispose();
+        if (pointsRef.current.material) {
+          if (Array.isArray(pointsRef.current.material)) {
+            pointsRef.current.material.forEach((m) => m.dispose());
+          } else {
+            pointsRef.current.material.dispose();
+          }
+        }
+      }
+
       if (mountRef.current) mountRef.current.innerHTML = "";
     };
-
-    // helpers referenced in cleanup
-    function setGrabbing() {
-      renderer.domElement.style.cursor = "grabbing";
-    }
-    function setGrab() {
-      renderer.domElement.style.cursor = "grab";
-    }
-    function onPointerMove() {}
-    function onPointerEnd() {}
-    function handleFocusEvent() {}
-    function handleResetView() {}
   }, []); // run once
 
   // UI / panel code (unchanged)
@@ -697,11 +715,11 @@ export default function Page() {
 
       <div style={panelBaseStyle}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <img src={logoSvg} alt="logo" style={{ width: 44, height: 44, borderRadius: 10 }} />
+          <img src="/ritual-logo.png" alt="logo" style={{ width: 44, height: 44, borderRadius: 10 }} />
           {!isMobile && panelOpen && (
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 16, fontWeight: 800, color: "#fff" }}>Ritual Community</div>
-              <div style={{ fontSize: 12, color: "#a9baff", marginTop: 2 }}>Global members — visual overview</div>
+              <div style={{ fontSize: 12, color: "#a9baff", marginTop: 2 }}>Global members - visual overview</div>
             </div>
           )}
           <button
