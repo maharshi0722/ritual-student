@@ -7,12 +7,8 @@ import { CSS2DRenderer, CSS2DObject } from "three/examples/jsm/renderers/CSS2DRe
 import * as turf from "@turf/turf";
 
 /*
-  Page.jsx (updated)
-  - Uses useRef for Three.js objects that need cross-scope access:
-    globeRef, atmosphereRef, globeGroupRef, pointsRef
-  - animate() and interaction handlers reference .current on those refs,
-    avoiding scope issues that stop rotation or cause runtime errors.
-  - Keeps the original behavior / cleanup.
+  GlobePage.jsx
+  - Fixed tooltip not showing total members by keeping points and countryList in refs
 */
 
 export default function Page() {
@@ -20,11 +16,9 @@ export default function Page() {
   const frameRef = useRef(null);
   const labelRendererRef = useRef(null);
 
-  // stable refs for Three.js objects that must be accessed from animate() and handlers
-  const globeRef = useRef(null);
-  const atmosphereRef = useRef(null);
-  const globeGroupRef = useRef(null);
+  // stable refs for asynchronous / cross-scope objects
   const pointsRef = useRef(null);
+  const countryListRef = useRef([]);
 
   const [tooltip, setTooltip] = useState(null);
   const [panelOpen, setPanelOpen] = useState(true);
@@ -222,7 +216,6 @@ export default function Page() {
 
     // create a group so we can rotate the globe independently
     const globeGroup = new THREE.Group();
-    globeGroupRef.current = globeGroup;
     scene.add(globeGroup);
 
     // globe mesh
@@ -239,7 +232,6 @@ export default function Page() {
         shininess: 2
       })
     );
-    globeRef.current = globe;
     globeGroup.add(globe);
 
     // atmosphere (added to same group)
@@ -252,7 +244,6 @@ export default function Page() {
         side: THREE.BackSide
       })
     );
-    atmosphereRef.current = atmosphere;
     globeGroup.add(atmosphere);
 
     // mobile adjustments
@@ -276,7 +267,8 @@ export default function Page() {
     const positionsArr = [];
     const colorsArr = [];
     const countryIndexArr = [];
-    const countryList = [];
+    const countryList = []; // we'll store a reference to this array
+    countryListRef.current = countryList;
     const borderVerts = [];
     const labelGroup = new THREE.Group();
     scene.add(labelGroup);
@@ -402,7 +394,7 @@ export default function Page() {
           });
 
           const pointsObject = new THREE.Points(geometry, material);
-          pointsRef.current = pointsObject;
+          pointsRef.current = pointsObject; // store into ref so handlers can access later
           scene.add(pointsObject);
         }
 
@@ -440,6 +432,7 @@ export default function Page() {
     function onPointerMove(e) {
       const [clientX, clientY] = updateMouseFromEvent(e);
       const pointsObject = pointsRef.current;
+      const countryListLocal = countryListRef.current;
       if (!pointsObject) {
         setTooltip(null);
         return;
@@ -450,12 +443,18 @@ export default function Page() {
         const idx = hits[0].index;
         const countryIdxAttr = pointsObject.geometry.getAttribute("countryIndex");
         const cIdx = Math.round(countryIdxAttr.getX(idx));
-        const meta = countryList[cIdx];
-        setTooltip({
-          x: clientX,
-          y: clientY,
-          text: `${meta.name} · ${meta.count.toLocaleString()} · ${meta.continent}`
-        });
+        const meta = countryListLocal[cIdx];
+        if (meta) {
+          // use meta.count but fall back to COMMUNITY_COUNTS as a safety
+          const total = meta.count ?? COMMUNITY_COUNTS[meta.name] ?? 0;
+          setTooltip({
+            x: clientX,
+            y: clientY,
+            text: `${meta.name} · ${total.toLocaleString()} · ${meta.continent}`
+          });
+        } else {
+          setTooltip(null);
+        }
       } else {
         setTooltip(null);
       }
@@ -562,17 +561,11 @@ export default function Page() {
 
     // animation loop: globeGroup rotates always and slowly; small X oscillation for depth
     function animate() {
-      // read from refs to ensure animate always has access to the objects
-      const gg = globeGroupRef.current;
-      const atm = atmosphereRef.current;
-      if (gg) {
-        gg.rotation.y += AUTO_ROTATE_SPEED;
-        t += AUTO_ROTATE_SPEED * 0.6; // time-like value for subtle nod
-        gg.rotation.x = Math.sin(t) * 0.02; // tiny nod to add life
-      }
-      if (atm) {
-        atm.rotation.y += AUTO_ROTATE_SPEED * 0.6; // atmosphere spin slightly different
-      }
+      // continuous rotation
+      globeGroup.rotation.y += AUTO_ROTATE_SPEED;
+      t += AUTO_ROTATE_SPEED * 0.6; // time-like value for subtle nod
+      globeGroup.rotation.x = Math.sin(t) * 0.02; // tiny nod to add life
+      atmosphere.rotation.y += AUTO_ROTATE_SPEED * 0.6; // atmosphere spin slightly different
 
       // label declutter
       const camDir = camera.position.clone().normalize();
@@ -642,21 +635,28 @@ export default function Page() {
       controls.dispose();
       renderer.dispose();
       spriteTex.dispose();
-
-      // dispose points geometry/material if present
       if (pointsRef.current) {
-        pointsRef.current.geometry.dispose();
-        if (pointsRef.current.material) {
-          if (Array.isArray(pointsRef.current.material)) {
-            pointsRef.current.material.forEach((m) => m.dispose());
-          } else {
-            pointsRef.current.material.dispose();
+        try {
+          pointsRef.current.geometry.dispose();
+          if (pointsRef.current.material) {
+            if (Array.isArray(pointsRef.current.material)) {
+              pointsRef.current.material.forEach((m) => m.dispose());
+            } else {
+              pointsRef.current.material.dispose();
+            }
           }
-        }
+        } catch (e) {}
       }
-
       if (mountRef.current) mountRef.current.innerHTML = "";
     };
+
+    // helpers referenced in cleanup
+    function setGrabbing() {
+      renderer.domElement.style.cursor = "grabbing";
+    }
+    function setGrab() {
+      renderer.domElement.style.cursor = "grab";
+    }
   }, []); // run once
 
   // UI / panel code (unchanged)
@@ -718,8 +718,8 @@ export default function Page() {
           <img src="/ritual-logo.png" alt="logo" style={{ width: 44, height: 44, borderRadius: 10 }} />
           {!isMobile && panelOpen && (
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 16, fontWeight: 800, color: "#fff" }}>Ritual Community</div>
-              <div style={{ fontSize: 12, color: "#a9baff", marginTop: 2 }}>Global members - visual overview</div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: "#fff" }}>Ritual Community Map</div>
+              <div style={{ fontSize: 12, color: "#a9baff", marginTop: 2 }}>Global members — visual overview</div>
             </div>
           )}
           <button
@@ -743,7 +743,7 @@ export default function Page() {
         {(panelOpen || isMobile) && (
           <>
             <div style={{ marginTop: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div style={{ fontSize: 13, color: "#9fb0ff", fontWeight: 600 }}>Communities</div>
+              <div style={{ fontSize: 13, color: "#9fb0ff", fontWeight: 600 }}>Communities Users</div>
               {isMobile && <div style={{ fontSize: 12, color: "#9aa0b7" }}>Tap a row to focus</div>}
             </div>
 <div
@@ -752,19 +752,23 @@ export default function Page() {
     display: "grid",
     gap: 8,
 
-    /* IMPORTANT */
     maxHeight: isMobile ? "28vh" : "calc(86vh - 160px)",
-    // overflowY: "auto",
 
-    /* Mobile momentum scrolling */
-    WebkitOverflowScrolling: "touch",
+    /* ✅ scroll only on mobile */
+    overflowY: isMobile ? "auto" : "visible",
 
-    /* Prevent touch from leaking to globe */
-    touchAction: "pan-y",
+    /* iOS smooth scrolling */
+    WebkitOverflowScrolling: isMobile ? "touch" : "auto",
+
+    /* Allow vertical pan on mobile only */
+    touchAction: isMobile ? "pan-y" : "auto",
 
     paddingBottom: 12
   }}
+  onTouchStart={isMobile ? (e) => e.stopPropagation() : undefined}
+  onTouchMove={isMobile ? (e) => e.stopPropagation() : undefined}
 >
+
 
               {displayCommunities.map((c) => (
                 <div
