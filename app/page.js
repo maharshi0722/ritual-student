@@ -26,7 +26,7 @@ export default function Page() {
 
   const displayCommunities = [
     { label: "Indian community", count: 15968, geo: "India" },
-    { label: "Chi", count: 16497, geo: "China" },
+    { label: "China", count: 16497, geo: "China" },
     { label: "日本語 (Japan)", count: 5149, geo: "Japan" },
     { label: "한국 커뮤니티 (Korea)", count: 7760, geo: "South Korea" },
     { label: "普通话交流区 (Chinese)", count: 15904, geo: "China" },
