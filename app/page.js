@@ -1,720 +1,844 @@
 "use client";
 
-import React, { useMemo, useRef, useState } from "react";
-import * as htmlToImage from "html-to-image";
+import { useEffect, useRef, useState } from "react";
+import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls";
+import { CSS2DRenderer, CSS2DObject } from "three/examples/jsm/renderers/CSS2DRenderer";
+import * as turf from "@turf/turf";
 
-/**
- * Fixes included:
- * 1) Bigger logo + title inside the CARD header
- * 2) Fix SecurityError: "Failed to read cssRules" from html-to-image
- *    - This happens when there are cross-origin stylesheets in the page (e.g. Google Fonts <link>)
- *    - Solution: DO NOT load remote CSS (Google fonts) while exporting.
- *    - Use ONLY system font stacks (export-safe) OR embed fonts as base64 (advanced).
- *    - Below we remove the Google font <link> entirely and use system "tech-like" fonts.
- *
- * NOTE: If you keep any <link rel="stylesheet" href="https://..."> in the document,
- * html-to-image may throw SecurityError. So keep fonts local/system for export reliability.
- */
+/*
+  GlobePage.jsx
+  - Fixed tooltip not showing total members by keeping points and countryList in refs
+*/
 
-const roleConfig = {
-  Initiate: { stars: 1, rarity: "INITIATE", emoji: "🌱", color: "#2ECC71", colorDark: "#1A7A3A" },
-  "Ritty Bitty": { stars: 2, rarity: "COMMON", emoji: "🐱", color: "#88BBFF", colorDark: "#4488CC" },
-  Ritty: { stars: 3, rarity: "RARE", emoji: "🕯️", color: "#AA66FF", colorDark: "#553399" },
-  Mage: { stars: 3, rarity: "MAGE", emoji: "🔮", color: "#CC44FF", colorDark: "#6622AA" },
-  Ritualist: { stars: 4, rarity: "EPIC", emoji: "🔥", color: "#FF8833", colorDark: "#CC4400" },
-  "Radiant Ritualist": { stars: 5, rarity: "LEGENDARY", emoji: "✦", color: "#FFD700", colorDark: "#996600" },
-};
+export default function Page() {
+  const mountRef = useRef(null);
+  const frameRef = useRef(null);
+  const labelRendererRef = useRef(null);
 
-// Export-safe fonts (no external CSS)
-const FONT_SANS =
-  'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"';
-const FONT_MONO =
-  'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
+  // stable refs for asynchronous / cross-scope objects
+  const pointsRef = useRef(null);
+  const countryListRef = useRef([]);
 
-// "Tech-ish" without remote font: uses square-ish system fonts when available
-const FONT_TECH = `"Bahnschrift", "DIN Alternate", "DIN Condensed", "Segoe UI", ${FONT_SANS}`;
+  const [tooltip, setTooltip] = useState(null);
+  const [panelOpen, setPanelOpen] = useState(true);
+  const [isMobile, setIsMobile] = useState(false);
 
-function fmtNum(n) {
-  if (n === null || n === undefined) return "—";
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
-  return String(n);
-}
+  const displayCommunities = [
+    { label: "Indian community", count: 15968, geo: "India" },
+    { label: "China", count: 16497, geo: "China" },
+    { label: "日本語 (Japan)", count: 5149, geo: "Japan" },
+    { label: "한국 커뮤니티 (Korea)", count: 7760, geo: "South Korea" },
+    { label: "普通话交流区 (Chinese)", count: 15904, geo: "China" },
+    { label: "Komunitas Indonesia", count: 11699, geo: "Indonesia" },
+    { label: "ชุมชนไทย (Thailand)", count: 5053, geo: "Thailand" },
+    { label: "Cộng đồng Việt Nam", count: 11158, geo: "Vietnam" },
+    { label: "Naija", count: 13214, geo: "Nigeria" },
+    { label: "Türkiye Topluluğu", count: 6155, geo: "Turkey" },
+    { label: "Українська громада (Ukraine)", count: 5801, geo: "Ukraine" },
+    { label: "Filipino", count: 2833, geo: "Philippines" },
+    { label: "Português", count: 11514, geo: "Portugal" }
+  ];
 
-function Star({ color }) {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill={color} aria-hidden="true">
-      <polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26" />
-    </svg>
-  );
-}
+  const COUNTRY_CONTINENT = {
+    India: "Asia",
+    China: "Asia",
+    Japan: "Asia",
+    "South Korea": "Asia",
+    Indonesia: "Asia",
+    Thailand: "Asia",
+    Vietnam: "Asia",
+    Nigeria: "Africa",
+    Turkey: "Eurasia",
+    Ukraine: "Europe",
+    Philippines: "Asia",
+    Portugal: "Europe"
+  };
 
-async function waitForImages(rootEl) {
-  const imgs = Array.from(rootEl.querySelectorAll("img"));
-  await Promise.all(
-    imgs.map(async (img) => {
-      try {
-        if (!img.complete) {
-          await new Promise((res, rej) => {
-            img.onload = res;
-            img.onerror = rej;
-          });
-        }
-        if (img.decode) await img.decode();
-      } catch {}
-    })
-  );
-}
+  const COMMUNITY_COUNTS = {
+    India: 15968,
+    China: 16497,
+    Japan: 5149,
+    "South Korea": 7760,
+    Indonesia: 11699,
+    Thailand: 5053,
+    Vietnam: 11158,
+    Nigeria: 13214,
+    Turkey: 6155,
+    Ukraine: 5801,
+    Philippines: 2833,
+    Portugal: 11514
+  };
 
-export default function RitualCardGenerator() {
-  const [handle, setHandle] = useState("");
-  const [selectedRole, setSelectedRole] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [exporting, setExporting] = useState(false);
-  const [error, setError] = useState("");
+  const COLORS = {
+    India: 0x9db8ff,
+    China: 0xb6a4ff,
+    Japan: 0xaecbff,
+    "South Korea": 0x9ad0ff,
+    Indonesia: 0x6ad1ff,
+    Thailand: 0x7fdcff,
+    Vietnam: 0x84c7ff,
+    Nigeria: 0x7cffb2,
+    Turkey: 0xcaa8ff,
+    Ukraine: 0xa3bfff,
+    Philippines: 0x9fcfff,
+    Portugal: 0xbfaaff
+  };
 
-  const [profile, setProfile] = useState({
-    username: "",
-    displayName: "USERNAME",
-    avatarUrl: "",
-    bio: "Stay Ritualized",
-    followers: null,
-    following: null,
-    tweets: null,
-  });
+  function focusCountry(countryGeoName) {
+    window.dispatchEvent(new CustomEvent("focus-country", { detail: { country: countryGeoName } }));
+  }
 
-  const [showCard, setShowCard] = useState(false);
-  const cardRef = useRef(null);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 820px)");
+    function onChange() {
+      const m = mq.matches;
+      setIsMobile(m);
+      setPanelOpen(!m);
+    }
+    onChange();
+    mq.addEventListener?.("change", onChange);
+    return () => mq.removeEventListener?.("change", onChange);
+  }, []);
 
-  const cfg = useMemo(() => (selectedRole ? roleConfig[selectedRole] : null), [selectedRole]);
+  useEffect(() => {
+    if (!mountRef.current) return;
 
-  const badgeStyle = useMemo(() => {
-    if (!cfg) return {};
-    return { color: cfg.color, borderColor: cfg.color, background: `${cfg.color}14` };
-  }, [cfg]);
+    // container
+    const container = document.createElement("div");
+    container.style.width = "100%";
+    container.style.height = "100%";
+    container.style.position = "relative";
+    mountRef.current.appendChild(container);
 
-  async function generateCard() {
-    setError("");
-    const username = handle.replace("@", "").trim();
-    if (!username) return setError("Please enter your X/Twitter username");
-    if (!selectedRole) return setError("Please select your role");
+    let width = window.innerWidth;
+    let height = window.innerHeight;
 
-    setLoading(true);
+    // scene
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x03030a);
 
-    let displayName = username;
-    let avatarUrl = "";
-    let bio = "Stay Ritualized";
-    let followers = null,
-      following = null,
-      tweets = null;
+    // helper latLon -> vector3
+    const latLon = (lat, lon, r = 1.02) => {
+      const phi = (90 - lat) * (Math.PI / 180);
+      const theta = (lon + 180) * (Math.PI / 180);
+      return new THREE.Vector3(
+        -(r * Math.sin(phi) * Math.cos(theta)),
+        r * Math.cos(phi),
+        r * Math.sin(phi) * Math.sin(theta)
+      );
+    };
 
-    try {
-      const res = await fetch(`https://api.fxtwitter.com/${username}`);
-      if (!res.ok) throw new Error("not found");
-      const data = await res.json();
+    // camera - centered so globe visually stays in center
+    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
+    camera.position.set(0, 0, 4);
+    camera.lookAt(0, 0, 0);
 
-      if (data?.user) {
-        const u = data.user;
+    // renderer
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(width, height);
+    renderer.domElement.style.display = "block";
+    renderer.domElement.style.touchAction = "none";
+    container.appendChild(renderer.domElement);
 
-        displayName = u.name || username;
+    // CSS2D renderer
+    const labelRenderer = new CSS2DRenderer();
+    labelRenderer.setSize(width, height);
+    labelRenderer.domElement.style.position = "absolute";
+    labelRenderer.domElement.style.top = "0";
+    labelRenderer.domElement.style.pointerEvents = "none";
+    labelRenderer.domElement.style.zIndex = "2";
+    container.appendChild(labelRenderer.domElement);
+    labelRendererRef.current = labelRenderer;
 
-        avatarUrl =
-          u.avatar_url ||
-          u.profile_image_url_https ||
-          u.profile_image_url ||
-          (u.avatar && u.avatar.url) ||
-          "";
+    // OrbitControls
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.enablePan = false;
+    controls.minDistance = 2.2;
+    controls.maxDistance = 6;
+    controls.rotateSpeed = 0.55;
+    controls.zoomSpeed = 0.9;
+    controls.target.set(0, 0, 0);
 
-        if (avatarUrl) avatarUrl = avatarUrl.replace("_normal", "_400x400");
-        if (avatarUrl) avatarUrl = `/api/img?url=${encodeURIComponent(avatarUrl)}`;
+    // lights
+    scene.add(new THREE.AmbientLight(0xffffff, 0.18));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.0);
+    sun.position.set(5, 2, 6);
+    scene.add(sun);
 
-        bio = u.description || u.bio || bio;
-        followers = u.followers_count ?? u.followers ?? null;
-        following = u.following_count ?? u.friends_count ?? null;
-        tweets = u.statuses_count ?? u.tweet_count ?? null;
+    // starfield
+    (function createStars() {
+      const starGeo = new THREE.BufferGeometry();
+      const starCount = 500;
+      const positions = new Float32Array(starCount * 3);
+      for (let i = 0; i < starCount; i++) {
+        const r = 45 + Math.random() * 40;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+        positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+        positions[i * 3 + 2] = r * Math.cos(phi);
       }
-    } catch {}
+      starGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      const starMat = new THREE.PointsMaterial({
+        color: 0xcfe8ff,
+        size: 0.5,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.85
+      });
+      const stars = new THREE.Points(starGeo, starMat);
+      scene.add(stars);
+    })();
 
-    setProfile({ username, displayName, avatarUrl, bio, followers, following, tweets });
-    setShowCard(true);
-    setLoading(false);
-  }
+    // sprite texture for points
+    function createSpriteTexture() {
+      const size = 64;
+      const canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+      grad.addColorStop(0, "rgba(255,255,255,1)");
+      grad.addColorStop(0.12, "rgba(230,220,255,0.98)");
+      grad.addColorStop(0.32, "rgba(180,150,255,0.72)");
+      grad.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, size, size);
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.minFilter = THREE.LinearFilter;
+      tex.generateMipmaps = false;
+      return tex;
+    }
+    const spriteTex = createSpriteTexture();
 
-  function reset() {
-    setShowCard(false);
-    setHandle("");
-    setSelectedRole("");
-    setError("");
-    setProfile({
-      username: "",
-      displayName: "USERNAME",
-      avatarUrl: "",
-      bio: "Stay Ritualized",
-      followers: null,
-      following: null,
-      tweets: null,
+    // create a group so we can rotate the globe independently
+    const globeGroup = new THREE.Group();
+    scene.add(globeGroup);
+
+    // globe mesh
+    const loader = new THREE.TextureLoader();
+    const earthDay = loader.load(
+      "https://raw.githubusercontent.com/pmndrs/drei-assets/master/textures/earth/earth_daymap.jpg"
+    );
+    const globe = new THREE.Mesh(
+      new THREE.SphereGeometry(1.02, 40, 40),
+      new THREE.MeshPhongMaterial({
+        map: earthDay,
+        color: new THREE.Color(0x070710),
+        specular: new THREE.Color(0x0b0b0b),
+        shininess: 2
+      })
+    );
+    globeGroup.add(globe);
+
+    // atmosphere (added to same group)
+    const atmosphere = new THREE.Mesh(
+      new THREE.SphereGeometry(1.09, 28, 28),
+      new THREE.MeshBasicMaterial({
+        color: 0x4d6bff,
+        transparent: true,
+        opacity: 0.055,
+        side: THREE.BackSide
+      })
+    );
+    globeGroup.add(atmosphere);
+
+    // mobile adjustments
+    const mobile = window.matchMedia("(max-width:800px)").matches;
+    const MAX_POINTS = mobile ? 900 : 1500;
+    const MAX_LABELS = mobile ? 8 : 999;
+    const MIN_PER_COUNTRY = mobile ? 2 : 3;
+
+    // prepare counts scaling
+    const countryKeys = Object.keys(COMMUNITY_COUNTS);
+    const prelimCounts = {};
+    let prelimTotal = 0;
+    countryKeys.forEach((k) => {
+      const v = Math.max(MIN_PER_COUNTRY, Math.floor(Math.sqrt(COMMUNITY_COUNTS[k]) * 3));
+      prelimCounts[k] = v;
+      prelimTotal += v;
     });
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
+    const scale = prelimTotal > MAX_POINTS ? MAX_POINTS / prelimTotal : 1;
 
-  async function download() {
-    if (!cardRef.current) return;
+    // buffers + labels bookkeeping
+    const positionsArr = [];
+    const colorsArr = [];
+    const countryIndexArr = [];
+    const countryList = []; // we'll store a reference to this array
+    countryListRef.current = countryList;
+    const borderVerts = [];
+    const labelGroup = new THREE.Group();
+    scene.add(labelGroup);
+    const cssLabelObjects = [];
+    const centroidMap = {};
 
-    try {
-      setExporting(true);
-      await new Promise((r) => setTimeout(r, 80));
-      await waitForImages(cardRef.current);
+    // turf sampling helper
+    function generateCountryPoints(feature, count) {
+      const pts = [];
+      const geom = feature.geometry;
+      const polygons =
+        geom.type === "MultiPolygon"
+          ? geom.coordinates.map((c) => turf.polygon(c))
+          : [turf.polygon(geom.coordinates)];
+      const bboxes = polygons.map((p) => turf.bbox(p));
+      let tries = 0;
+      const maxTries = Math.max(500, count * 30);
+      while (pts.length < count && tries < maxTries) {
+        const i = Math.floor(Math.random() * polygons.length);
+        const r = turf.randomPoint(1, { bbox: bboxes[i] }).features[0];
+        if (turf.booleanPointInPolygon(r, polygons[i])) {
+          pts.push(r.geometry.coordinates);
+        }
+        tries++;
+      }
+      return pts;
+    }
 
-      /**
-       * SecurityError cssRules fix:
-       * - html-to-image tries to read document.styleSheets[i].cssRules
-       * - if any stylesheet is cross-origin, reading cssRules throws SecurityError
-       *
-       * Mitigation:
-       * - avoid cross-origin stylesheets (google fonts, cdn css)
-       * - and tell html-to-image to skip fonts/css parsing as much as possible:
-       */
-      const dataUrl = await htmlToImage.toPng(cardRef.current, {
-        pixelRatio: 4,
-        cacheBust: true,
-        backgroundColor: LIGHT.bg,
-        // Reduce odds of reading problematic stylesheets
-        skipFonts: true,
-        // Works around some CORS tainting in certain cases
-        fetchRequestInit: { mode: "cors", cache: "no-store" },
+    // load geojson and build geometry & labels
+    fetch("https://raw.githubusercontent.com/holtzy/D3-graph-gallery/master/DATA/world.geojson")
+      .then((res) => res.json())
+      .then((world) => {
+        let addedLabels = 0;
+        world.features.forEach((feature) => {
+          const name = feature.properties.name;
+          const count = COMMUNITY_COUNTS[name];
+
+          // borders
+          const geom = feature.geometry;
+          const polygonsForBorders = geom.type === "Polygon" ? [geom.coordinates] : geom.coordinates;
+          polygonsForBorders.forEach((poly) => {
+            poly.forEach((ring) => {
+              ring.forEach(([lon, lat]) => {
+                const v = latLon(lat, lon, 1.035);
+                borderVerts.push(v.x, v.y, v.z);
+              });
+              if (ring.length > 0) {
+                const [lon0, lat0] = ring[0];
+                const v0 = latLon(lat0, lon0, 1.035);
+                borderVerts.push(v0.x, v0.y, v0.z);
+              }
+            });
+          });
+
+          // centroid for focus & label
+          try {
+            const centroid = turf.centroid(feature).geometry.coordinates;
+            const c3 = latLon(centroid[1], centroid[0], 1.06);
+            centroidMap[name] = c3.clone();
+
+            if (count && addedLabels < MAX_LABELS) {
+              const el = document.createElement("div");
+              el.textContent = name;
+              el.style.color = "#cfe6ff";
+              el.style.fontSize = "12px";
+              el.style.fontFamily =
+                "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial";
+              el.style.textShadow = "0 4px 10px rgba(0,0,0,0.7)";
+              el.style.pointerEvents = "none";
+              el.style.whiteSpace = "nowrap";
+              el.style.opacity = "0.95";
+              const labelObj = new CSS2DObject(el);
+              labelObj.position.copy(c3);
+              labelGroup.add(labelObj);
+              cssLabelObjects.push({ obj: labelObj, priority: count, worldPos: c3.clone(), name });
+              addedLabels++;
+            }
+          } catch (e) {}
+
+          if (!count) return;
+
+          // points
+          const base = prelimCounts[name] || MIN_PER_COUNTRY;
+          const dotCount = Math.max(MIN_PER_COUNTRY, Math.round(base * scale));
+          const countryIdx = countryList.length;
+          countryList.push({
+            name,
+            count,
+            color: COLORS[name] || 0x9db8ff,
+            continent: COUNTRY_CONTINENT[name] || "Unknown"
+          });
+
+          const pts = generateCountryPoints(feature, dotCount);
+          pts.forEach(([lon, lat]) => {
+            const v = latLon(lat, lon, 1.02);
+            positionsArr.push(v.x, v.y, v.z);
+            const col = new THREE.Color(countryList[countryIdx].color);
+            col.offsetHSL(0, 0, (Math.random() - 0.5) * 0.05);
+            colorsArr.push(col.r, col.g, col.b);
+            countryIndexArr.push(countryIdx);
+          });
+        });
+
+        // Points (single draw)
+        if (positionsArr.length) {
+          const positions = new Float32Array(positionsArr);
+          const colors = new Float32Array(colorsArr);
+          const countryIdxs = new Float32Array(countryIndexArr);
+
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+          geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+          geometry.setAttribute("countryIndex", new THREE.BufferAttribute(countryIdxs, 1));
+
+          const material = new THREE.PointsMaterial({
+            size: mobile ? 0.03 : 0.038,
+            map: spriteTex,
+            vertexColors: true,
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            sizeAttenuation: true
+          });
+
+          const pointsObject = new THREE.Points(geometry, material);
+          pointsRef.current = pointsObject; // store into ref so handlers can access later
+          scene.add(pointsObject);
+        }
+
+        // Borders (merged)
+        if (borderVerts.length) {
+          const borderGeo = new THREE.BufferGeometry();
+          borderGeo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(borderVerts), 3));
+          const borderMat = new THREE.LineBasicMaterial({
+            color: 0x1f2126,
+            transparent: true,
+            opacity: 0.95
+          });
+          const borderLines = new THREE.LineSegments(borderGeo, borderMat);
+          scene.add(borderLines);
+        }
       });
 
-      const a = document.createElement("a");
-      a.download = `ritual-card-${profile.username || "card"}.png`;
-      a.href = dataUrl;
-      a.click();
-    } catch (e) {
-      console.error(e);
-      alert(
-        "Download failed due to a browser SecurityError.\n\nFix: remove any external <link rel='stylesheet'> (Google Fonts/CDN CSS) from the page. Use system fonts or self-host fonts."
-      );
-    } finally {
-      setExporting(false);
+    // raycaster/pointer interactions
+    const raycaster = new THREE.Raycaster();
+    raycaster.params.Points.threshold = 0.04;
+    const mouse = new THREE.Vector2();
+
+    function updateMouseFromEvent(e) {
+      if (e.touches && e.touches[0]) {
+        mouse.x = (e.touches[0].clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(e.touches[0].clientY / window.innerHeight) * 2 + 1;
+        return [e.touches[0].clientX, e.touches[0].clientY];
+      } else {
+        mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+        return [e.clientX, e.clientY];
+      }
     }
-  }
+
+    function onPointerMove(e) {
+      const [clientX, clientY] = updateMouseFromEvent(e);
+      const pointsObject = pointsRef.current;
+      const countryListLocal = countryListRef.current;
+      if (!pointsObject) {
+        setTooltip(null);
+        return;
+      }
+      raycaster.setFromCamera(mouse, camera);
+      const hits = raycaster.intersectObject(pointsObject);
+      if (hits.length) {
+        const idx = hits[0].index;
+        const countryIdxAttr = pointsObject.geometry.getAttribute("countryIndex");
+        const cIdx = Math.round(countryIdxAttr.getX(idx));
+        const meta = countryListLocal[cIdx];
+        if (meta) {
+          // use meta.count but fall back to COMMUNITY_COUNTS as a safety
+          const total = meta.count ?? COMMUNITY_COUNTS[meta.name] ?? 0;
+          setTooltip({
+            x: clientX,
+            y: clientY,
+            text: `${meta.name} · ${total.toLocaleString()} · ${meta.continent}`
+          });
+        } else {
+          setTooltip(null);
+        }
+      } else {
+        setTooltip(null);
+      }
+    }
+
+    function onPointerEnd() {
+      const pointsObject = pointsRef.current;
+      if (!pointsObject) return;
+      raycaster.setFromCamera(mouse, camera);
+      const hits = raycaster.intersectObject(pointsObject);
+      if (hits.length) {
+        const p = hits[0].point.clone().normalize().multiplyScalar(2.6);
+        animateCameraTo(p, 700); // camera animates but globeGroup keeps rotating
+      }
+    }
+
+    window.addEventListener("mousemove", onPointerMove, { passive: true });
+    window.addEventListener("touchmove", onPointerMove, { passive: true });
+    window.addEventListener("click", onPointerEnd);
+    window.addEventListener("touchend", onPointerEnd);
+
+    // cursor UX
+    renderer.domElement.style.cursor = "grab";
+    function setGrabbing() {
+      renderer.domElement.style.cursor = "grabbing";
+    }
+    function setGrab() {
+      renderer.domElement.style.cursor = "grab";
+    }
+    renderer.domElement.addEventListener("pointerdown", setGrabbing);
+    window.addEventListener("pointerup", setGrab);
+    renderer.domElement.addEventListener("mouseenter", setGrab);
+    renderer.domElement.addEventListener("mouseleave", () => (renderer.domElement.style.cursor = "default"));
+
+    // camera animation helper (doesn't stop globe rotation)
+    let cameraAnimHandle = null;
+    function animateCameraTo(toPosition, duration = 800) {
+      if (cameraAnimHandle) cancelAnimationFrame(cameraAnimHandle);
+      const startPos = camera.position.clone();
+      const startTarget = controls.target.clone();
+      const newTarget = toPosition.clone().normalize().multiplyScalar(1.02);
+      let start = null;
+      function step(ts) {
+        if (!start) start = ts;
+        const t = Math.min(1, (ts - start) / duration);
+        const ease = 0.5 - 0.5 * Math.cos(Math.PI * t);
+        camera.position.lerpVectors(startPos, toPosition, ease);
+        controls.target.lerpVectors(startTarget, newTarget, ease);
+        controls.update();
+        if (t < 1) cameraAnimHandle = requestAnimationFrame(step);
+        else cameraAnimHandle = null;
+      }
+      cameraAnimHandle = requestAnimationFrame(step);
+    }
+
+    // panel focus listener
+    function handleFocusEvent(e) {
+      const country = e?.detail?.country;
+      if (!country) return;
+      const centroid = centroidMap[country];
+      if (centroid) {
+        const to = centroid.clone().normalize().multiplyScalar(2.6);
+        animateCameraTo(to, 900);
+      }
+    }
+    window.addEventListener("focus-country", handleFocusEvent);
+
+    // reset-view handler (returns camera to centered pos)
+    function handleResetView() {
+      const toPos = new THREE.Vector3(0, 0, 4);
+      const target = new THREE.Vector3(0, 0, 0);
+      if (cameraAnimHandle) cancelAnimationFrame(cameraAnimHandle);
+      const startPos = camera.position.clone();
+      const startTarget = controls.target.clone();
+      const duration = 800;
+      let start = null;
+      function step(ts) {
+        if (!start) start = ts;
+        const t = Math.min(1, (ts - start) / duration);
+        const ease = 0.5 - 0.5 * Math.cos(Math.PI * t);
+        camera.position.lerpVectors(startPos, toPos, ease);
+        controls.target.lerpVectors(startTarget, target, ease);
+        controls.update();
+        if (t < 1) requestAnimationFrame(step);
+      }
+      requestAnimationFrame(step);
+    }
+    window.addEventListener("reset-view", handleResetView);
+
+    // resize handler
+    function onResize() {
+      width = window.innerWidth;
+      height = window.innerHeight;
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+      renderer.setSize(width, height);
+      labelRenderer.setSize(width, height);
+    }
+    window.addEventListener("resize", onResize);
+
+    // always-rotate speed
+    const AUTO_ROTATE_SPEED = mobile ? 0.0006 : 0.0003;
+    let t = 0;
+
+    // animation loop: globeGroup rotates always and slowly; small X oscillation for depth
+    function animate() {
+      // continuous rotation
+      globeGroup.rotation.y += AUTO_ROTATE_SPEED;
+      t += AUTO_ROTATE_SPEED * 0.6; // time-like value for subtle nod
+      globeGroup.rotation.x = Math.sin(t) * 0.02; // tiny nod to add life
+      atmosphere.rotation.y += AUTO_ROTATE_SPEED * 0.6; // atmosphere spin slightly different
+
+      // label declutter
+      const camDir = camera.position.clone().normalize();
+      const camDist = camera.position.length();
+      const candidates = [];
+      for (let i = 0; i < cssLabelObjects.length; i++) {
+        const entry = cssLabelObjects[i];
+        const dot = camDir.dot(entry.worldPos.clone().normalize());
+        if (dot <= 0.08) {
+          entry.obj.element.style.display = "none";
+          continue;
+        }
+        const v = entry.worldPos.clone().project(camera);
+        const sx = (v.x + 1) * 0.5 * window.innerWidth;
+        const sy = (-v.y + 1) * 0.5 * window.innerHeight;
+        if (camDist > 7.5 && entry.priority < 6000) {
+          entry.obj.element.style.display = "none";
+          continue;
+        }
+        entry.obj.element.style.display = "";
+        const el = entry.obj.element;
+        const w = el.offsetWidth || 80;
+        const h = el.offsetHeight || 16;
+        candidates.push({ entry, left: sx - (isMobile ? 6 : 8), top: sy - h / 2, right: sx - (isMobile ? 6 : 8) + w, bottom: sy + h / 2, priority: entry.priority });
+      }
+
+      candidates.sort((a, b) => b.priority - a.priority);
+      const kept = [];
+      for (const c of candidates) {
+        let overlap = false;
+        for (const k of kept) {
+          if (!(c.right < k.left || c.left > k.right || c.bottom < k.top || c.top > k.bottom)) {
+            overlap = true;
+            break;
+          }
+        }
+        if (!overlap) {
+          kept.push(c);
+          c.entry.obj.element.style.display = "";
+        } else {
+          c.entry.obj.element.style.display = "none";
+        }
+      }
+
+      controls.update();
+      renderer.render(scene, camera);
+      labelRenderer.render(scene, camera);
+      frameRef.current = requestAnimationFrame(animate);
+    }
+    animate();
+
+    // cleanup
+    return () => {
+      cancelAnimationFrame(frameRef.current);
+      if (cameraAnimHandle) cancelAnimationFrame(cameraAnimHandle);
+      window.removeEventListener("mousemove", onPointerMove);
+      window.removeEventListener("touchmove", onPointerMove);
+      window.removeEventListener("click", onPointerEnd);
+      window.removeEventListener("touchend", onPointerEnd);
+      window.removeEventListener("focus-country", handleFocusEvent);
+      window.removeEventListener("reset-view", handleResetView);
+      window.removeEventListener("resize", onResize);
+      renderer.domElement.removeEventListener("pointerdown", setGrabbing);
+      window.removeEventListener("pointerup", setGrab);
+      renderer.domElement.removeEventListener("mouseenter", setGrab);
+      renderer.domElement.removeEventListener("mouseleave", () => (renderer.domElement.style.cursor = "default"));
+      controls.dispose();
+      renderer.dispose();
+      spriteTex.dispose();
+      if (pointsRef.current) {
+        try {
+          pointsRef.current.geometry.dispose();
+          if (pointsRef.current.material) {
+            if (Array.isArray(pointsRef.current.material)) {
+              pointsRef.current.material.forEach((m) => m.dispose());
+            } else {
+              pointsRef.current.material.dispose();
+            }
+          }
+        } catch (e) {}
+      }
+      if (mountRef.current) mountRef.current.innerHTML = "";
+    };
+
+    // helpers referenced in cleanup
+    function setGrabbing() {
+      renderer.domElement.style.cursor = "grabbing";
+    }
+    function setGrab() {
+      renderer.domElement.style.cursor = "grab";
+    }
+  }, []); // run once
+
+  // UI / panel code (unchanged)
+  const logoSvg = `data:image/svg+xml;utf8,${encodeURIComponent(`
+    <svg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 40 40'>
+      <defs><linearGradient id='g' x1='0' x2='1' y1='0' y2='1'><stop offset='0' stop-color='#8ab6ff'/><stop offset='1' stop-color='#c9b7ff'/></linearGradient></defs>
+      <rect rx='9' ry='9' width='40' height='40' fill='rgba(255,255,255,0.02)'/>
+      <circle cx='20' cy='12' r='7' fill='url(#g)'/>
+      <text x='20' y='27' font-size='13' fill='#e9f0ff' font-family='Inter, Arial' text-anchor='middle'>R</text>
+    </svg>
+  `)}`;
+
+  const panelBaseStyle = {
+    position: "absolute",
+    left: isMobile ? 12 : 20,
+    right: isMobile ? 12 : undefined,
+    bottom: isMobile ? 12 : undefined,
+    top: isMobile ? undefined : 20,
+    width: isMobile ? "auto" : panelOpen ? 320 : 56,
+    maxHeight: isMobile ? "40vh" : "86vh",
+    padding: panelOpen ? (isMobile ? "10px 12px" : 16) : 8,
+    borderRadius: 14,
+    background: panelOpen ? "linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01))" : "rgba(255,255,255,0.02)",
+    backdropFilter: panelOpen && !isMobile ? "blur(8px) saturate(120%)" : undefined,
+    boxShadow: panelOpen ? "0 14px 48px rgba(2,6,12,0.6)" : "0 8px 20px rgba(2,6,12,0.5)",
+    color: "#eaf0ff",
+    zIndex: 50,
+    transition: "width 220ms ease, padding 220ms ease, transform 220ms ease"
+  };
 
   return (
-    <div style={styles.page}>
-      <header style={styles.header}>
-        <div style={styles.brandRow}>
-          <img src="/logo.png" alt="Ritual" style={styles.siteLogo} />
-          <h1 style={styles.h1}>
-            Ritual <span style={styles.h1Span}>Card</span>
-          </h1>
-        </div>
-        <p style={styles.subtitle}>Generate your card</p>
-      </header>
+    <div
+      style={{
+        width: "100vw",
+        height: "100vh",
+        position: "relative",
+        fontFamily:
+          "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial",
+        background:
+          "radial-gradient(ellipse at 30% 25%, rgba(20,28,50,0.12) 0%, rgba(6,8,12,0.0) 30%), linear-gradient(180deg,#05060b 0%, #020207 100%)",
+        color: "#eaf0ff",
+        overflow: "hidden"
+      }}
+    >
+      <div ref={mountRef} style={{ width: "100%", height: "100%" }} />
 
-      {!showCard && (
-        <section style={styles.panel}>
-          <div style={styles.formGroup}>
-            <label style={styles.label}>X / Twitter Username</label>
-            <div style={styles.inputWrap}>
-              <span style={styles.atPrefix}>@</span>
-              <input
-                value={handle}
-                onChange={(e) => setHandle(e.target.value)}
-                placeholder="yourhandle"
-                style={styles.input}
-                autoComplete="off"
-              />
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          pointerEvents: "none",
+          background:
+            "radial-gradient(ellipse at center, rgba(0,0,0,0) 40%, rgba(2,4,8,0.35) 75%, rgba(2,4,8,0.7) 100%)"
+        }}
+      />
+
+      <div style={panelBaseStyle}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <img src="/ritual-logo.png" alt="logo" style={{ width: 44, height: 44, borderRadius: 10 }} />
+          {!isMobile && panelOpen && (
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 16, fontWeight: 800, color: "#fff" }}>Ritual Community Map</div>
+              <div style={{ fontSize: 12, color: "#a9baff", marginTop: 2 }}>Global members — visual overview</div>
             </div>
-          </div>
+          )}
+          <button
+            onClick={() => setPanelOpen((s) => !s)}
+            aria-label="Toggle panel"
+            style={{
+              marginLeft: 4,
+              background: "transparent",
+              border: "none",
+              color: "#bfcfff",
+              cursor: "pointer",
+              fontSize: 18,
+              padding: 6
+            }}
+            title={panelOpen ? "Collapse" : "Expand"}
+          >
+            {panelOpen ? (isMobile ? "▾" : "—") : "≡"}
+          </button>
+        </div>
 
-          <div style={styles.formGroup}>
-            <label style={styles.label}>Select your role</label>
-            <div style={styles.roleGrid}>
-              {Object.keys(roleConfig).map((role) => (
-                <button
-                  key={role}
-                  type="button"
-                  onClick={() => setSelectedRole(role)}
+        {(panelOpen || isMobile) && (
+          <>
+            <div style={{ marginTop: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ fontSize: 13, color: "#9fb0ff", fontWeight: 600 }}>Communities Users</div>
+              {isMobile && <div style={{ fontSize: 12, color: "#9aa0b7" }}>Tap a row to focus</div>}
+            </div>
+<div
+  style={{
+    marginTop: 8,
+    display: "grid",
+    gap: 8,
+
+    maxHeight: isMobile ? "28vh" : "calc(86vh - 160px)",
+
+    /* ✅ scroll only on mobile */
+    overflowY: isMobile ? "auto" : "visible",
+
+    /* iOS smooth scrolling */
+    WebkitOverflowScrolling: isMobile ? "touch" : "auto",
+
+    /* Allow vertical pan on mobile only */
+    touchAction: isMobile ? "pan-y" : "auto",
+
+    paddingBottom: 12
+  }}
+  onTouchStart={isMobile ? (e) => e.stopPropagation() : undefined}
+  onTouchMove={isMobile ? (e) => e.stopPropagation() : undefined}
+>
+
+
+              {displayCommunities.map((c) => (
+                <div
+                  key={c.label}
+                  onClick={() => focusCountry(c.geo)}
                   style={{
-                    ...styles.roleBtn,
-                    ...(selectedRole === role ? styles.roleBtnActive : null),
-                    gridColumn: role === "Radiant Ritualist" ? "span 2" : undefined,
-                    borderColor: selectedRole === role ? roleConfig[role].color : styles.roleBtn.borderColor,
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    padding: isMobile ? "8px 10px" : "10px 12px",
+                    borderRadius: 10,
+                    background: "linear-gradient(180deg, rgba(10,12,20,0.12), rgba(8,8,12,0.02))",
+                    cursor: "pointer",
+                    transition: "transform 160ms ease",
+                    userSelect: "none"
                   }}
+                  onMouseEnter={(e) => (e.currentTarget.style.transform = "translateY(-3px)")}
+                  onMouseLeave={(e) => (e.currentTarget.style.transform = "none")}
                 >
-                  <span style={{ position: "relative", zIndex: 1 }}>
-                    {roleConfig[role].emoji} {role}
-                    {role === "Radiant Ritualist" ? " ✦" : ""}
-                  </span>
-                  {selectedRole === role && (
-                    <span
-                      aria-hidden="true"
-                      style={{
-                        ...styles.roleBtnGlow,
-                        background: `linear-gradient(135deg, ${roleConfig[role].colorDark}, ${roleConfig[role].color})`,
-                      }}
-                    />
-                  )}
-                </button>
+                  <div style={{ fontSize: 13, color: "#eaf0ff", lineHeight: 1.1 }}>{c.label}</div>
+                  <div style={{ color: "#c6cfe6", fontVariantNumeric: "tabular-nums", fontSize: 13 }}>
+                    {c.count.toLocaleString()}
+                  </div>
+                </div>
               ))}
             </div>
-          </div>
 
-          <button
-            type="button"
-            onClick={generateCard}
-            style={{ ...styles.primaryBtn, opacity: loading ? 0.75 : 1 }}
-            disabled={loading}
-          >
-            {loading ? "Fetching profile..." : "Generate card"}
-          </button>
 
-          {error && <div style={styles.errorMsg}>{error}</div>}
-        </section>
-      )}
+          </>
+        )}
+      </div>
 
-      {showCard && cfg && (
-        <section style={styles.cardWrap}>
-          <div ref={cardRef} style={styles.cardOuter}>
-            <div style={styles.outerGlow} aria-hidden="true" />
-            <div style={styles.frameOuter} aria-hidden="true" />
-            <div style={styles.frameInner} aria-hidden="true" />
+      <div style={{ position: "absolute", right: 20, top: 20, display: "flex", gap: 10, zIndex: 50 }}>
+        <button
+          onClick={() => window.dispatchEvent(new CustomEvent("reset-view"))}
+          style={{
+            padding: "8px 12px",
+            borderRadius: 10,
+            background: "linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01))",
+            border: "1px solid rgba(255,255,255,0.04)",
+            color: "#dfe8ff",
+            cursor: "pointer",
+            fontSize: 13,
+            backdropFilter: "blur(6px)"
+          }}
+        >
+          Reset view
+        </button>
+      </div>
 
-            <div style={{ ...styles.cornerSpark, left: 14, top: 14 }}>✦</div>
-            <div style={{ ...styles.cornerSpark, right: 14, top: 14 }}>✦</div>
-            <div style={{ ...styles.cornerSpark, left: 14, bottom: 14 }}>✦</div>
-            <div style={{ ...styles.cornerSpark, right: 14, bottom: 14 }}>✦</div>
-
-            <div style={styles.card}>
-              <div style={styles.techTopNotch} aria-hidden="true" />
-
-              <div style={styles.cardHeader}>
-                <div style={styles.ritualLogoRow}>
-                  {/* bigger logo */}
-                  <img src="/logo.png" alt="Ritual" style={styles.cardLogoImg} />
-                  {/* bigger title */}
-                  <span style={styles.ritualLogoText}>RITUAL</span>
-                </div>
-
-                <span style={{ ...styles.badge, ...badgeStyle }}>{cfg.rarity}</span>
-              </div>
-
-              <div style={styles.cardName}>{profile.displayName}</div>
-
-              <div style={styles.avatarSection}>
-                <div style={styles.avatarScreen}>
-                  <div
-                    style={{
-                      ...styles.avatarFrame,
-                      borderColor: `${cfg.color}66`,
-                      boxShadow: `0 0 0 3px ${cfg.color}18, 0 18px 50px ${cfg.color}14`,
-                    }}
-                  >
-                    {profile.avatarUrl ? (
-                      <img src={profile.avatarUrl} alt={`${profile.displayName} avatar`} style={styles.avatarImg} />
-                    ) : (
-                      <div style={styles.avatarPlaceholder}>{cfg.emoji}</div>
-                    )}
-                  </div>
-                </div>
-
-                <div style={styles.sideHandle}>@{profile.username}</div>
-              </div>
-
-              <div style={styles.cardBody}>
-                <div style={styles.starsRow}>
-                  {Array.from({ length: cfg.stars }).map((_, i) => (
-                    <Star key={i} color={cfg.color} />
-                  ))}
-                </div>
-
-                <div style={styles.roleLabelRow}>
-                  <span style={{ ...styles.roleLabel, ...badgeStyle }}>{selectedRole.toUpperCase()}</span>
-                </div>
-
-                {/* ONLY FOLLOWERS */}
-                {profile.followers !== null && (
-                  <div style={styles.statsRowSingle}>
-                    <div style={styles.statItem}>
-                      <div style={styles.statVal}>{fmtNum(profile.followers)}</div>
-                      <div style={styles.statLbl}>FOLLOWERS</div>
-                    </div>
-                  </div>
-                )}
-
-                <div style={styles.divider} />
-
-                <div style={styles.sloganBox}>
-                  <div style={styles.ritualModeLabel}>◦ Stay Ritualized</div>
-                  <div style={styles.bioText}>{profile.bio || "Stay Ritualized"}</div>
-                </div>
-              </div>
-
-              <div style={styles.cardFooter}>
-                <span style={styles.footerLabel}>RITUAL · 2026</span>
-                <span style={styles.footerDot} />
-                <span style={styles.footerLabel}>{selectedRole.toUpperCase()}</span>
-              </div>
-            </div>
-          </div>
-
-          <div style={styles.actions}>
-            <button type="button" onClick={download} style={{ ...styles.downloadBtn, opacity: exporting ? 0.7 : 1 }}>
-              {exporting ? "Exporting..." : "Download HD"}
-            </button>
-            <button type="button" onClick={reset} style={styles.secondaryBtn}>
-              Make another
-            </button>
-          </div>
-        </section>
+      {tooltip && (
+        <div
+          style={{
+            position: "fixed",
+            left: tooltip.x + 12,
+            top: tooltip.y + 12,
+            background: "linear-gradient(180deg, rgba(8,10,20,0.98), rgba(6,6,10,0.94))",
+            color: "#eaf0ff",
+            padding: "8px 12px",
+            borderRadius: 10,
+            fontSize: 13,
+            pointerEvents: "none",
+            boxShadow: "0 12px 36px rgba(0,0,0,0.6)",
+            zIndex: 9999,
+            transform: "translateZ(0)"
+          }}
+        >
+          {tooltip.text}
+        </div>
       )}
     </div>
   );
 }
-
-const LIGHT = {
-  bg: "#F7F5FF",
-  text: "#1A0A00",
-  muted: "rgba(26,10,0,0.62)",
-  purple: "#7B2FFF",
-  pink: "#FF2F9A",
-  gold: "#FFB800",
-};
-
-const styles = {
-  page: {
-    minHeight: "100vh",
-    padding: "26px 16px 72px",
-    background:
-      "radial-gradient(900px 600px at 20% 0%, rgba(123,47,255,0.12), transparent 60%), radial-gradient(900px 600px at 80% 10%, rgba(255,47,154,0.10), transparent 55%), #F7F5FF",
-    fontFamily: FONT_SANS,
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    position: "relative",
-    overflowX: "hidden",
-    color: LIGHT.text,
-  },
-
-  header: { textAlign: "center", marginBottom: 16 },
-  brandRow: { display: "flex", alignItems: "center", justifyContent: "center", gap: 10 },
-  siteLogo: { width: 40, height: 40, objectFit: "contain", filter: "drop-shadow(0 0 12px rgba(123,47,255,0.18))" },
-  h1: { margin: 0, fontSize: 28, letterSpacing: 0.8, fontWeight: 600, color: LIGHT.text, fontFamily: FONT_TECH },
-  h1Span: {
-    background: `linear-gradient(135deg,${LIGHT.purple},${LIGHT.pink})`,
-    WebkitBackgroundClip: "text",
-    WebkitTextFillColor: "transparent",
-  },
-  subtitle: { margin: "10px 0 0", fontSize: 12, letterSpacing: 0.2, color: LIGHT.muted, fontFamily: FONT_MONO },
-
-  panel: {
-    width: "100%",
-    maxWidth: 520,
-    background: "rgba(255,255,255,0.78)",
-    border: "1px solid rgba(123,47,255,0.10)",
-    borderRadius: 18,
-    padding: 22,
-    boxShadow: "0 18px 60px rgba(20,10,0,0.10)",
-    backdropFilter: "blur(10px)",
-  },
-
-  formGroup: { marginBottom: 16, textAlign: "left" },
-  label: { display: "block", fontSize: 12, letterSpacing: 0.2, fontWeight: 700, color: LIGHT.muted, marginBottom: 8 },
-
-  inputWrap: {
-    display: "flex",
-    border: "1px solid rgba(0,0,0,0.10)",
-    borderRadius: 12,
-    overflow: "hidden",
-    background: "rgba(255,255,255,0.8)",
-  },
-  atPrefix: {
-    padding: "12px 12px",
-    fontWeight: 700,
-    color: LIGHT.purple,
-    background: "rgba(123,47,255,0.06)",
-    borderRight: "1px solid rgba(0,0,0,0.08)",
-  },
-  input: { flex: 1, border: "none", outline: "none", padding: "12px 12px", background: "transparent", fontSize: 14, color: LIGHT.text },
-
-  roleGrid: { display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10 },
-  roleBtn: {
-    position: "relative",
-    overflow: "hidden",
-    borderRadius: 12,
-    border: "1px solid rgba(0,0,0,0.10)",
-    background: "rgba(255,255,255,0.8)",
-    padding: "12px 12px",
-    cursor: "pointer",
-    fontWeight: 650,
-    color: LIGHT.text,
-  },
-  roleBtnActive: { color: "white", transform: "translateY(-1px)" },
-  roleBtnGlow: { position: "absolute", inset: 0, opacity: 1 },
-
-  primaryBtn: {
-    width: "100%",
-    marginTop: 10,
-    border: "none",
-    cursor: "pointer",
-    borderRadius: 12,
-    padding: "14px 14px",
-    fontWeight: 650,
-    letterSpacing: 0.4,
-    color: "white",
-    background: `linear-gradient(135deg,${LIGHT.purple},${LIGHT.pink})`,
-    boxShadow: "0 14px 36px rgba(123,47,255,0.18)",
-    fontFamily: FONT_TECH,
-  },
-  errorMsg: {
-    marginTop: 12,
-    padding: "10px 12px",
-    borderRadius: 10,
-    background: "rgba(255,60,60,0.08)",
-    border: "1px solid rgba(255,60,60,0.25)",
-    color: "#B42318",
-    fontSize: 13,
-    fontFamily: FONT_MONO,
-  },
-
-  cardWrap: { marginTop: 18, display: "flex", flexDirection: "column", alignItems: "center", gap: 16 },
-
-  cardOuter: {
-    width: "min(420px, 94vw)",
-    borderRadius: 28,
-    position: "relative",
-    padding: 18,
-  },
-
-  outerGlow: {
-    position: "absolute",
-    inset: -10,
-    borderRadius: 34,
-    background:
-      "radial-gradient(closest-side, rgba(255,184,0,0.35), transparent 65%), radial-gradient(closest-side, rgba(123,47,255,0.16), transparent 65%)",
-    filter: "blur(10px)",
-    opacity: 0.9,
-    zIndex: 0,
-    pointerEvents: "none",
-  },
-
-  frameOuter: {
-    position: "absolute",
-    inset: 0,
-    borderRadius: 28,
-    background: "linear-gradient(135deg, #FFF2C7 0%, #FFB800 40%, #FFD76A 70%, #FFF2C7 100%)",
-    boxShadow: "0 18px 70px rgba(255,184,0,0.30)",
-    zIndex: 1,
-  },
-
-  frameInner: {
-    position: "absolute",
-    inset: 10,
-    borderRadius: 20,
-    zIndex: 2,
-    background:
-      "linear-gradient(180deg, rgba(0,0,0,0.10), rgba(0,0,0,0.03)), repeating-linear-gradient(90deg, rgba(0,0,0,0.07) 0 1px, transparent 1px 16px)",
-    clipPath:
-      "polygon(22px 0, calc(100% - 22px) 0, 100% 22px, 100% calc(100% - 22px), calc(100% - 22px) 100%, 22px 100%, 0 calc(100% - 22px), 0 22px)",
-    border: "1px solid rgba(0,0,0,0.18)",
-  },
-
-  cornerSpark: {
-    position: "absolute",
-    zIndex: 6,
-    fontSize: 12,
-    color: "rgba(0,0,0,0.45)",
-    textShadow: "0 1px 0 rgba(255,255,255,0.75)",
-    userSelect: "none",
-  },
-
-  card: {
-    position: "relative",
-    zIndex: 5,
-    borderRadius: 18,
-    overflow: "hidden",
-    background: "linear-gradient(180deg, #1B1B1F 0%, #111114 100%)",
-    border: "1px solid rgba(0,0,0,0.35)",
-    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
-    fontFamily: FONT_SANS,
-  },
-
-  techTopNotch: {
-    position: "absolute",
-    zIndex: 9,
-    top: 10,
-    left: "50%",
-    transform: "translateX(-50%)",
-    width: 130,
-    height: 10,
-    background: "linear-gradient(90deg, transparent, rgba(255,184,0,0.55), transparent)",
-    clipPath: "polygon(10px 0, calc(100% - 10px) 0, 100% 100%, 0 100%)",
-    opacity: 0.85,
-    pointerEvents: "none",
-  },
-
-  cardHeader: {
-    padding: "12px 14px",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    background: "linear-gradient(135deg, rgba(255,184,0,0.14), rgba(123,47,255,0.10))",
-    borderBottom: "1px solid rgba(255,255,255,0.08)",
-  },
-
-  ritualLogoRow: { display: "flex", alignItems: "center", gap: 10 },
-
-  // BIGGER card logo
-  cardLogoImg: {
-    width: 26,
-    height: 26,
-    objectFit: "contain",
-    filter: "drop-shadow(0 0 10px rgba(255,184,0,0.20))",
-  },
-
-  // BIGGER card title
-  ritualLogoText: {
-    fontWeight: 650,
-    letterSpacing: 2.6,
-    fontSize: 13,
-    color: "rgba(255,184,0,0.95)",
-    fontFamily: FONT_TECH,
-  },
-
-  badge: {
-    fontSize: 10,
-    border: "1px solid rgba(255,255,255,0.18)",
-    borderRadius: 999,
-    padding: "4px 10px",
-    fontWeight: 600,
-    letterSpacing: 0.8,
-    background: "rgba(0,0,0,0.25)",
-    fontFamily: FONT_MONO,
-  },
-
-  cardName: {
-    padding: "14px 14px 12px",
-    textAlign: "center",
-    fontWeight: 650,
-    fontSize: 22,
-    letterSpacing: 0.6,
-    color: "rgba(230,240,255,0.95)",
-    borderBottom: "1px solid rgba(255,255,255,0.08)",
-    fontFamily: FONT_TECH,
-  },
-
-  avatarSection: {
-    padding: "14px 14px 16px",
-    position: "relative",
-    display: "flex",
-    justifyContent: "center",
-    borderBottom: "1px solid rgba(255,255,255,0.08)",
-  },
-
-  avatarScreen: {
-    padding: 10,
-    borderRadius: 16,
-    background: "linear-gradient(135deg, rgba(255,184,0,0.12), rgba(255,255,255,0.05))",
-    border: "1px solid rgba(255,184,0,0.22)",
-    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.08)",
-  },
-
-  avatarFrame: {
-    width: 190,
-    height: 190,
-    borderRadius: 12,
-    overflow: "hidden",
-    border: "2px solid rgba(255,255,255,0.12)",
-    background: "linear-gradient(135deg, rgba(255,255,255,0.08), rgba(0,0,0,0.08))",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  avatarImg: { width: "100%", height: "100%", objectFit: "cover" },
-  avatarPlaceholder: { fontSize: 56, color: "rgba(255,255,255,0.90)" },
-
-  sideHandle: {
-    position: "absolute",
-    right: 8,
-    top: "50%",
-    transform: "translateY(-50%) rotate(90deg)",
-    fontFamily: FONT_MONO,
-    fontSize: 10,
-    letterSpacing: 2.2,
-    color: "rgba(255,184,0,0.45)",
-    whiteSpace: "nowrap",
-  },
-
-  cardBody: {
-    padding: "14px 14px 16px",
-    background: "linear-gradient(180deg, rgba(255,255,255,0.96), rgba(255,255,255,0.92))",
-    color: LIGHT.text,
-  },
-
-  starsRow: { display: "flex", justifyContent: "center", gap: 6, marginBottom: 10 },
-
-  roleLabelRow: { display: "flex", justifyContent: "center", marginBottom: 12 },
-  roleLabel: {
-    border: "1px solid",
-    borderRadius: 999,
-    padding: "7px 16px",
-    fontWeight: 650,
-    letterSpacing: 3.2,
-    fontSize: 11,
-    background: "rgba(255,255,255,0.75)",
-    fontFamily: FONT_TECH,
-  },
-
-  statsRowSingle: { display: "flex", justifyContent: "center", marginBottom: 12 },
-  statItem: { textAlign: "center", minWidth: 160 },
-  statVal: { fontWeight: 650, fontSize: 22, color: LIGHT.purple, fontFamily: FONT_TECH, letterSpacing: 0.6 },
-  statLbl: { fontSize: 10, letterSpacing: 2.2, color: LIGHT.muted, fontWeight: 600, fontFamily: FONT_MONO },
-
-  divider: { height: 1, background: "linear-gradient(90deg,transparent,rgba(0,0,0,0.14),transparent)", margin: "12px 0" },
-
-  sloganBox: {
-    background: "rgba(123,47,255,0.05)",
-    border: "1px solid rgba(123,47,255,0.12)",
-    borderRadius: 14,
-    padding: "12px 12px",
-    textAlign: "center",
-  },
-  ritualModeLabel: { fontWeight: 650, color: LIGHT.purple, letterSpacing: 1.0, fontSize: 10, marginBottom: 6, fontFamily: FONT_TECH },
-  bioText: { color: "rgba(26,10,0,0.72)", fontStyle: "italic", fontWeight: 500, fontSize: 13, lineHeight: 1.35, fontFamily: FONT_SANS },
-
-  cardFooter: {
-    padding: "12px 14px",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    borderTop: "1px solid rgba(255,255,255,0.08)",
-    background: "linear-gradient(135deg, rgba(0,0,0,0.35), rgba(123,47,255,0.10))",
-  },
-
-  footerLabel: { color: "rgba(255,184,0,0.55)", fontWeight: 650, letterSpacing: 1.6, fontSize: 10, fontFamily: FONT_TECH },
-  footerDot: { width: 7, height: 7, borderRadius: 999, background: LIGHT.pink, boxShadow: "0 0 12px rgba(255,47,154,0.25)" },
-
-  actions: { display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "center" },
-  downloadBtn: {
-    padding: "12px 18px",
-    borderRadius: 12,
-    border: "1px solid rgba(0,0,0,0.10)",
-    background: "white",
-    color: LIGHT.text,
-    fontWeight: 650,
-    letterSpacing: 0.3,
-    cursor: "pointer",
-    boxShadow: "0 12px 28px rgba(20,10,0,0.10)",
-    fontFamily: FONT_TECH,
-  },
-  secondaryBtn: {
-    padding: "12px 18px",
-    borderRadius: 12,
-    border: "1px solid rgba(0,0,0,0.10)",
-    background: "transparent",
-    color: LIGHT.muted,
-    fontWeight: 650,
-    cursor: "pointer",
-    fontFamily: FONT_SANS,
-  },
-};
